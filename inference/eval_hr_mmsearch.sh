@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 WORK_DIR="$(cd "${REPO_DIR}/.." && pwd)"
 
-export MODEL_BASE_URL="${MODEL_BASE_URL:-http://localhost:8888}"
+export MODEL_BASE_URL="${MODEL_BASE_URL:-http://localhost:18888}"
 export SUMMARIZER_BASE_URL="${SUMMARIZER_BASE_URL:-http://localhost:8181}"
 export SUMMARIZER_MODEL="${SUMMARIZER_MODEL:-qwen3-32b}"
 
