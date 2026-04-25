@@ -755,16 +755,30 @@ def load_datasets(config_path: str, data_root: str = "") -> tuple[list[dict], di
                 raw = json.loads(line)
                 prompt = raw.get("prompt", [])
                 question = ""
-                for msg in prompt:
-                    if msg.get("role") == "user":
-                        question = msg.get("content", "").replace("<image>", "").strip()
-                        break
+                if prompt:
+                    for msg in prompt:
+                        if msg.get("role") == "user":
+                            question = msg.get("content", "").replace("<image>", "").strip()
+                            break
+                else:
+                    # HR-MMSearch HF format uses query/query_image/ground_truth.
+                    question = raw.get("query") or raw.get("question") or raw.get("problem") or ""
 
                 reward_model = raw.get("reward_model", {})
                 # Keep full ground_truth list - loops through all for LLM judge
-                answer = reward_model.get("ground_truth", [""])
+                answer = reward_model.get("ground_truth", raw.get("ground_truth", [""]))
+                if not isinstance(answer, list):
+                    answer = [answer]
                 images = raw.get("image", [])
-                image_path = os.path.join(root, images[0]) if images else ""
+                if isinstance(images, str):
+                    images = [images]
+                if not images:
+                    image_value = raw.get("query_image") or raw.get("image_path")
+                    images = [image_value] if image_value else []
+                image_path = ""
+                if images:
+                    image_rel = str(images[0]).replace("\\", "/")
+                    image_path = image_rel if os.path.isabs(image_rel) else os.path.join(root, image_rel)
 
                 # Extract image search data if present (for data-driven image_search_tool)
                 # Data is at top level in data.jsonl: image_search_title_list, image_search_thumbnail_list
