@@ -2241,6 +2241,10 @@ def main():
                         help="Temperature for LLM judge (default: 0.0)")
     parser.add_argument("--data-root", type=str, default="", help="Root for relative paths")
     parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument("--max-samples", type=int, default=None,
+                        help="Limit number of samples after loading datasets, useful for smoke tests")
+    parser.add_argument("--sample-offset", type=int, default=0,
+                        help="Skip the first N loaded samples before applying --max-samples")
 
     parser.add_argument("--max-concurrent", type=int, default=4)
     parser.add_argument("--max-tokens", type=int, default=4096)
@@ -2293,6 +2297,11 @@ def main():
     # Load datasets
     print(f"Loading datasets from {args.datasets}...")
     samples, dataset_configs = load_datasets(args.datasets, args.data_root)
+    if args.sample_offset or args.max_samples is not None:
+        start = args.sample_offset
+        end = None if args.max_samples is None else start + args.max_samples
+        samples = samples[start:end]
+        print(f"Using sample slice [{start}:{end if end is not None else ''}] for this run")
     print(f"Loaded {len(samples)} samples total\n")
 
     # Check LLM judge requirement
