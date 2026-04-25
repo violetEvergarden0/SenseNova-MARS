@@ -1294,7 +1294,19 @@ async def call_text_search(
                         data = await resp.json()
                         organic_results = data.get("organic", [])
                         if not organic_results:
-                            return f"No search results found for query: {query}"
+                            response_text = f"No search results found for query: {query}"
+                            if return_details:
+                                return {
+                                    "response": response_text,
+                                    "cached": False,
+                                    "query": query,
+                                    "top_k": top_k,
+                                    "search_results": [],
+                                    "all_search_results": [],
+                                    "summaries_count": 0,
+                                    "error": "no_search_results",
+                                }
+                            return response_text
                         # Restructure results
                         # all_search_results = ALL organic results (for display in final summary)
                         # search_results = top_k results (for URL fetching/summarization)
@@ -1518,6 +1530,7 @@ async def evaluate_tool(
     original_image.load()
     if original_image.mode != "RGB":
         original_image = original_image.convert("RGB")
+    image_history = [original_image]
 
     # Process for initial display
     processed = process_image(original_image, kwargs.get("min_pixels", 65536),
@@ -1582,11 +1595,35 @@ async def evaluate_tool(
             if tool_name == "image_zoom_in_tool":
                 bbox = args.get("bbox_2d") or args.get("bbox")
                 if bbox and len(bbox) == 4:
-                    cropped = crop_image(original_image, bbox,
+                    try:
+                        img_idx = int(args.get("img_idx", args.get("image_index", 0)))
+                    except (TypeError, ValueError):
+                        img_idx = 0
+                    if img_idx < 0 or img_idx >= len(image_history):
+                        tool_response = (
+                            f"<tool_response>\nError: Image at index {img_idx} not found. "
+                            f"Available images: {len(image_history)}\n</tool_response>"
+                        )
+                        tool_calls.append({
+                            "turn": turn + 1,
+                            "name": tool_name,
+                            "arguments": args,
+                            "bbox": bbox,
+                            "img_idx": img_idx,
+                            "status": "error",
+                            "error": "image_not_found",
+                        })
+                        messages.append({"role": "user", "content": tool_response})
+                        output_parts.append(f"{output}<|im_end|><|im_start|>user\n{tool_response}<|im_end|>\n<|im_start|>assistant\n")
+                        continue
+
+                    source_image = image_history[img_idx]
+                    cropped = crop_image(source_image, bbox,
                                          min_pixels=kwargs.get("min_pixels", 65536),
                                          max_pixels=kwargs.get("max_pixels", 8294400),
                                          factor=kwargs.get("factor", 32),
                                          qwen_vl_processing=kwargs.get("qwen_vl_processing", True))
+                    image_history.append(cropped)
                     crop_b64, crop_mime = image_to_base64(cropped)
                     # Save cropped image for HTML
                     crop_img_path = save_image_for_html(cropped, "zoom")
@@ -1598,7 +1635,7 @@ async def evaluate_tool(
                         "arguments": args,
                         "bbox": bbox,
                         "label": args.get("label", ""),
-                        "img_idx": args.get("img_idx"),
+                        "img_idx": img_idx,
                         "status": "ok",
                         "response_preview": "Returned a cropped zoom image.",
                         "saved_image_marker": f"[IMAGE {image_counter}]",
@@ -1642,12 +1679,14 @@ async def evaluate_tool(
                         return_details=True,
                     )
                     search_result = search_details["response"] if isinstance(search_details, dict) else str(search_details)
+                    search_error = search_details.get("error") if isinstance(search_details, dict) else None
                     tool_calls.append({
                         "turn": turn + 1,
                         "name": tool_name,
                         "arguments": args,
                         "query": query,
-                        "status": "ok",
+                        "status": "error" if search_error else "ok",
+                        "error": search_error,
                         "cached": search_details.get("cached") if isinstance(search_details, dict) else None,
                         "search_results": search_details.get("search_results", []) if isinstance(search_details, dict) else [],
                         "all_search_results_count": len(search_details.get("all_search_results", [])) if isinstance(search_details, dict) else None,
@@ -1677,6 +1716,7 @@ async def evaluate_tool(
                     "status": "empty",
                     "titles": [],
                     "thumbnail_paths": [],
+                    "image_history_indices": [],
                 }
                 if image_search_data:
                     title_list = image_search_data.get("image_search_title_list", [])
@@ -1703,6 +1743,8 @@ async def evaluate_tool(
                                         kwargs.get("factor", 32),
                                         kwargs.get("qwen_vl_processing", True))
                                     thumb_b64, thumb_mime = image_to_base64(thumb_img)
+                                    image_history.append(thumb_img)
+                                    image_search_call["image_history_indices"].append(len(image_history) - 1)
                                     content_parts.append({"type": "image_url", "image_url": {"url": f"data:{thumb_mime};base64,{thumb_b64}"}})
                                     # Save thumbnail for HTML
                                     thumb_img_path = save_image_for_html(thumb_img, "thumbnail")
@@ -1945,7 +1987,7 @@ async def run_evaluation(
     max_concurrent: int = 4,
     output_dir: str = "",
     **kwargs,
-) -> tuple[list[dict], dict]:
+) -> dict:
     """Run evaluation on all samples."""
     datasets = set(s.get("dataset", "") for s in samples)
 
@@ -2638,8 +2680,7 @@ def main():
 
         save_results(dataset_results, output_dir)
     finally:
-        # Skip browser cleanup - Playwright can hang indefinitely and OS will clean up on exit
-        # Always print cache stats and close, even on error
+        # Browser cleanup runs inside run_evaluation; always print cache stats and close.
         if search_cache:
             stats = search_cache.get_stats()
             print(f"Search cache: {stats['hits']}/{stats['total']} hits ({stats['hit_rate']:.1f}%), {stats['misses']} new searches cached", flush=True)

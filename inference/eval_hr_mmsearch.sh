@@ -21,7 +21,7 @@ SERPER_CONCURRENCY="${SERPER_CONCURRENCY:-1}"
 MAX_TURNS="${MAX_TURNS:-50}"
 MAX_SAMPLES="${MAX_SAMPLES:-}"
 SAMPLE_OFFSET="${SAMPLE_OFFSET:-0}"
-SEARCH_CACHE_DIR="${SEARCH_CACHE_DIR:-${WORK_DIR}/outputs/search_cache}"
+SEARCH_CACHE_DIR="${SEARCH_CACHE_DIR:-${OUTPUT_DIR}/search_cache}"
 
 if [ "${JUDGE_CLIENT}" = "azure" ]; then
   : "${AZURE_OPENAI_API_KEY:?Set AZURE_OPENAI_API_KEY for Azure judge}"
@@ -29,6 +29,9 @@ if [ "${JUDGE_CLIENT}" = "azure" ]; then
   export AZURE_API_VERSION="${AZURE_API_VERSION:-2025-01-01-preview}"
 elif [ "${JUDGE_CLIENT}" = "openai" ]; then
   : "${OPENAI_API_KEY:?Set OPENAI_API_KEY for OpenAI judge}"
+  if [ -z "${OPENAI_BASE_URL:-}" ]; then
+    echo "Warning: OPENAI_BASE_URL is not set; the judge will use the official OpenAI endpoint." >&2
+  fi
 else
   echo "Unsupported JUDGE_CLIENT: ${JUDGE_CLIENT}. Use azure or openai." >&2
   exit 1
