@@ -12,6 +12,7 @@ export SUMMARIZER_MODEL="${SUMMARIZER_MODEL:-qwen3-32b}"
 
 MODE="${MODE:-tool}"
 JUDGE_CLIENT="${JUDGE_CLIENT:-azure}"
+JUDGE_MODEL="${JUDGE_MODEL:-gpt-4o-2024-11-20}"
 MODEL_NAME="${MODEL_NAME:-SenseNova-MARS-8B}"
 MODEL_TAG="${MODEL_NAME//\//_}"
 OUTPUT_DIR="${OUTPUT_DIR:-${WORK_DIR}/outputs/hr_mmsearch_${MODEL_TAG}_${MODE}_$(date +%y%m%d%H%M%S)}"
@@ -44,6 +45,7 @@ cd "${SCRIPT_DIR}"
 ARGS=(
   --model-client openai
   --judge-client "${JUDGE_CLIENT}"
+  --judge-model "${JUDGE_MODEL}"
   --model "${MODEL_NAME}"
   --mode "${MODE}"
   --datasets ../test_hr_mmsearch.json

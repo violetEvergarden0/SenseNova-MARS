@@ -583,7 +583,7 @@ def get_judge_client(judge_client_type: str, judge_base_url: str, judge_api_key:
         )
 
 
-async def llm_judge_score(question: str, model_answer: str, ground_truth: list | str, image_path: str, judge_client: str, judge_base_url: str, judge_api_key: str, judge_temperature: float = 0.0) -> float:
+async def llm_judge_score(question: str, model_answer: str, ground_truth: list | str, image_path: str, judge_client: str, judge_base_url: str, judge_api_key: str, judge_temperature: float = 0.0, judge_model: str = "gpt-4o-2024-11-20") -> float:
     """Use LLM to judge if answer is correct. Returns 1.0 or 0.0.
 
     Flow:
@@ -619,7 +619,7 @@ async def llm_judge_score(question: str, model_answer: str, ground_truth: list |
 
     # Get client with max_retries=5
     client = get_judge_client(judge_client, judge_base_url, judge_api_key)
-    model = "gpt-4o-2024-11-20"
+    model = judge_model
 
     llm_score = 0.0
 
@@ -1709,10 +1709,11 @@ async def evaluate_sample(
                     judge_base_url = kwargs.get("judge_base_url", "")
                     judge_api_key = kwargs.get("judge_api_key", "")
                     judge_temperature = kwargs.get("judge_temperature", 0.0)
+                    judge_model = kwargs.get("judge_model", "gpt-4o-2024-11-20")
                     scores[method] = await llm_judge_score(
                         sample["question"], result["output"], sample["answer"],
                         sample["image_path"],  # Send image to vision model judge
-                        judge_client, judge_base_url, judge_api_key, judge_temperature
+                        judge_client, judge_base_url, judge_api_key, judge_temperature, judge_model
                     )
                 else:
                     # Unknown method - skip or set to None
@@ -1893,7 +1894,7 @@ async def run_evaluation(
 
             # Save immediately (skip keys not suitable for jsonl)
             if results_file_handle:
-                jsonl_skip_keys = {"saved_images", "tool_calls"}
+                jsonl_skip_keys = {"saved_images"}
                 jsonl_result = {k: v for k, v in result.items() if k not in jsonl_skip_keys}
                 results_file_handle.write(json.dumps(jsonl_result, ensure_ascii=False) + "\n")
                 results_file_handle.flush()
@@ -2239,6 +2240,8 @@ def main():
                         help="Judge API client: openai or azure (required if using LLM judge)")
     parser.add_argument("--judge-temperature", type=float, default=0.0,
                         help="Temperature for LLM judge (default: 0.0)")
+    parser.add_argument("--judge-model", type=str, default="gpt-4o-2024-11-20",
+                        help="Model/deployment name for LLM judge")
     parser.add_argument("--data-root", type=str, default="", help="Root for relative paths")
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument("--max-samples", type=int, default=None,
@@ -2381,6 +2384,7 @@ def main():
         "judge_base_url": judge_base_url,
         "judge_api_key": judge_api_key,
         "judge_temperature": args.judge_temperature,
+        "judge_model": args.judge_model,
     }
 
     # Health check - crash early if servers are down
