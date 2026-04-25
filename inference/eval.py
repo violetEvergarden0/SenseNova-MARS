@@ -577,10 +577,10 @@ def get_judge_client(judge_client_type: str, judge_base_url: str, judge_api_key:
         )
     else:
         # OpenAI official API
-        return OpenAI(
-            api_key=judge_api_key,
-            max_retries=5,
-        )
+        kwargs = {"api_key": judge_api_key, "max_retries": 5}
+        if judge_base_url:
+            kwargs["base_url"] = judge_base_url
+        return OpenAI(**kwargs)
 
 
 async def llm_judge_score(question: str, model_answer: str, ground_truth: list | str, image_path: str, judge_client: str, judge_base_url: str, judge_api_key: str, judge_temperature: float = 0.0, judge_model: str = "gpt-4o-2024-11-20") -> float:
@@ -2327,6 +2327,7 @@ def main():
             if "OPENAI_API_KEY" not in os.environ:
                 parser.error("OPENAI_API_KEY required for judge")
             judge_api_key = os.environ["OPENAI_API_KEY"]
+            judge_base_url = os.environ.get("OPENAI_BASE_URL", "")
 
     # Get serper key and summarizer config for tool mode
     serper_api_key = ""
