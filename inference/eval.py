@@ -10,7 +10,7 @@ import os
 import re
 import string
 import time
-from typing import Optional
+from typing import Optional, Any
 
 import atexit
 import hashlib
@@ -32,6 +32,16 @@ class FatalAPIError(Exception):
 class URLFetchError(Exception):
     """Raised when URL fetch fails with a retriable error (timeout, HTTP error, etc.)."""
     pass
+
+
+def truncate_text(text: Any, limit: int = 2000) -> str:
+    """Return a compact string preview for logs and JSONL diagnostics."""
+    if text is None:
+        return ""
+    text = str(text)
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"... [truncated {len(text) - limit} chars]"
 
 
 class WebFetchStats:
@@ -583,8 +593,8 @@ def get_judge_client(judge_client_type: str, judge_base_url: str, judge_api_key:
         return OpenAI(**kwargs)
 
 
-async def llm_judge_score(question: str, model_answer: str, ground_truth: list | str, image_path: str, judge_client: str, judge_base_url: str, judge_api_key: str, judge_temperature: float = 0.0, judge_model: str = "gpt-4o-2024-11-20") -> float:
-    """Use LLM to judge if answer is correct. Returns 1.0 or 0.0.
+async def llm_judge_evaluate(question: str, model_answer: str, ground_truth: list | str, image_path: str, judge_client: str, judge_base_url: str, judge_api_key: str, judge_temperature: float = 0.0, judge_model: str = "gpt-4o-2024-11-20") -> dict:
+    """Use LLM to judge if answer is correct and return analysis details.
 
     Flow:
     1. Preprocess and extract answer (fallback to full response)
@@ -597,13 +607,27 @@ async def llm_judge_score(question: str, model_answer: str, ground_truth: list |
     # Extract answer with preprocessing
     extracted_answer = extract_answer_allow_no_tag(model_answer)
 
-    # EM check first - skip LLM if exact match
-    if em_check(extracted_answer, ground_truth):
-        return 1.0
-
     # Convert to list if string
     if isinstance(ground_truth, str):
         ground_truth = [ground_truth]
+
+    # EM check first - skip LLM if exact match
+    if em_check(extracted_answer, ground_truth):
+        matched_gt = None
+        for gt in ground_truth:
+            if normalize_answer(gt) == normalize_answer(extracted_answer):
+                matched_gt = gt
+                break
+        return {
+            "score": 1.0,
+            "decision": "Yes",
+            "method": "exact_match",
+            "final_answer": extracted_answer,
+            "matched_gt": matched_gt,
+            "judge_client": judge_client,
+            "judge_model": judge_model,
+            "attempts": [],
+        }
 
     # Prepare image content once (reused for all ground truths)
     image_content = None
@@ -621,7 +645,7 @@ async def llm_judge_score(question: str, model_answer: str, ground_truth: list |
     client = get_judge_client(judge_client, judge_base_url, judge_api_key)
     model = judge_model
 
-    llm_score = 0.0
+    attempts = []
 
     # Loop through ALL ground truths
     for gt in ground_truth:
@@ -656,15 +680,47 @@ async def llm_judge_score(question: str, model_answer: str, ground_truth: list |
             content = response.choices[0].message.content
 
             match = re.search(r'<judge>\s*(Yes|No)\s*</judge>', content, re.IGNORECASE | re.DOTALL)
+            decision = match.group(1).capitalize() if match else "Unparsed"
+            attempts.append({
+                "ground_truth": gt,
+                "decision": decision,
+                "raw_response": content,
+            })
             if match and match.group(1).lower() == "yes":
-                return 1.0  # Early return on first match
+                return {
+                    "score": 1.0,
+                    "decision": "Yes",
+                    "method": "llm_judge",
+                    "final_answer": extracted_answer,
+                    "matched_gt": gt,
+                    "judge_client": judge_client,
+                    "judge_model": judge_model,
+                    "attempts": attempts,
+                }  # Early return on first match
         except Exception as e:
             # After 5 retries failed, this is a serious issue
             error_msg = f"[LLM JUDGE ERROR] API call failed after 5 retries: {type(e).__name__}: {str(e)}"
             print(f"[ERROR] {error_msg}", flush=True)
             raise FatalAPIError(error_msg) from None
 
-    return llm_score  # 0.0 if no ground truth matched
+    return {
+        "score": 0.0,
+        "decision": "No",
+        "method": "llm_judge",
+        "final_answer": extracted_answer,
+        "matched_gt": None,
+        "judge_client": judge_client,
+        "judge_model": judge_model,
+        "attempts": attempts,
+    }
+
+
+async def llm_judge_score(question: str, model_answer: str, ground_truth: list | str, image_path: str, judge_client: str, judge_base_url: str, judge_api_key: str, judge_temperature: float = 0.0, judge_model: str = "gpt-4o-2024-11-20") -> float:
+    """Backward-compatible score-only wrapper."""
+    return (await llm_judge_evaluate(
+        question, model_answer, ground_truth, image_path,
+        judge_client, judge_base_url, judge_api_key, judge_temperature, judge_model
+    ))["score"]
 
 
 # =============================================================================
@@ -722,6 +778,14 @@ def load_datasets(config_path: str, data_root: str = "") -> tuple[list[dict], di
                     thumbs = raw["image_search_thumbnail_list"]
                     image_search_kwargs["image_search_thumbnail_list"] = thumbs[:IMAGE_SEARCH_MAX_RESULTS] if thumbs else None
 
+                metadata = {
+                    k: v for k, v in raw.items()
+                    if k not in {"prompt", "reward_model"}
+                }
+                metadata["raw_index"] = idx
+                metadata["annotation"] = annotation
+                metadata["root"] = root
+
                 sample = {
                     "id": f"{dataset_name}-{idx}",
                     "question": question,
@@ -729,6 +793,7 @@ def load_datasets(config_path: str, data_root: str = "") -> tuple[list[dict], di
                     "image_path": image_path,
                     "dataset": dataset_name,
                     "data_root": root,
+                    "metadata": metadata,
                 }
                 if image_search_kwargs:
                     sample["image_search_data"] = image_search_kwargs
@@ -1180,7 +1245,8 @@ async def call_text_search(
     content_limit: int = 30000,
     search_cache: Optional["SearchCache"] = None,
     max_serper_attempts: int = 3,
-) -> str:
+    return_details: bool = False,
+) -> Any:
     """Call Google Serper API for text search, fetch each URL, summarize each, then generate final summary.
 
     Flow:
@@ -1194,7 +1260,17 @@ async def call_text_search(
     if search_cache:
         cached = await search_cache.get(query, top_k, summarizer_model)
         if cached:
-            return f"Found cached summary for query: {query}\n{cached}"
+            response_text = f"Found cached summary for query: {query}\n{cached}"
+            if return_details:
+                return {
+                    "response": response_text,
+                    "cached": True,
+                    "query": query,
+                    "top_k": top_k,
+                    "search_results": [],
+                    "summaries_count": None,
+                }
+            return response_text
 
     # Step 1: Search via Serper (rate limited by semaphore)
     # Search API doesn't use "num" parameter - gets default results then slices to top_k
@@ -1305,7 +1381,19 @@ async def call_text_search(
 
     # Return error if final summary fails
     if not final_summary:
-        return f"Error: Failed to generate final summary for query: {query}"
+        response_text = f"Error: Failed to generate final summary for query: {query}"
+        if return_details:
+            return {
+                "response": response_text,
+                "cached": False,
+                "query": query,
+                "top_k": top_k,
+                "search_results": search_results or [],
+                "all_search_results": all_search_results or [],
+                "summaries_count": len([s for s in summaries if s]),
+                "error": "final_summary_failed",
+            }
+        return response_text
 
     result = final_summary
 
@@ -1313,7 +1401,18 @@ async def call_text_search(
     if search_cache:
         await search_cache.set(query, top_k, summarizer_model, result)
 
-    return f"Final summary generated for query: {query}\n{result}"
+    response_text = f"Final summary generated for query: {query}\n{result}"
+    if return_details:
+        return {
+            "response": response_text,
+            "cached": False,
+            "query": query,
+            "top_k": top_k,
+            "search_results": search_results or [],
+            "all_search_results": all_search_results or [],
+            "summaries_count": len([s for s in summaries if s]),
+        }
+    return response_text
 
 
 # =============================================================================
@@ -1493,7 +1592,17 @@ async def evaluate_tool(
                     crop_img_path = save_image_for_html(cropped, "zoom")
                     if crop_img_path:
                         saved_images.append({"marker": f"[IMAGE {image_counter}]", "path": crop_img_path, "type": "zoom"})
-                    tool_calls.append({"name": tool_name, "bbox": bbox, "label": args.get("label", "")})
+                    tool_calls.append({
+                        "turn": turn + 1,
+                        "name": tool_name,
+                        "arguments": args,
+                        "bbox": bbox,
+                        "label": args.get("label", ""),
+                        "img_idx": args.get("img_idx"),
+                        "status": "ok",
+                        "response_preview": "Returned a cropped zoom image.",
+                        "saved_image_marker": f"[IMAGE {image_counter}]",
+                    })
                     tool_response = f"<tool_response>\nHere is the zoomed image:[IMAGE {image_counter}]\n</tool_response>"
                     messages.append({
                         "role": "user",
@@ -1505,6 +1614,13 @@ async def evaluate_tool(
                     })
                 else:
                     tool_response = "<tool_response>\nError: Invalid bbox format.\n</tool_response>"
+                    tool_calls.append({
+                        "turn": turn + 1,
+                        "name": tool_name,
+                        "arguments": args,
+                        "status": "error",
+                        "error": "Invalid bbox format.",
+                    })
                     messages.append({"role": "user", "content": tool_response})
 
             elif tool_name == "text_search_tool":
@@ -1515,7 +1631,7 @@ async def evaluate_tool(
                     serper_semaphore = kwargs.get("serper_semaphore")
                     search_cache = kwargs.get("search_cache")
                     serper_concurrency = kwargs.get("serper_concurrency", 5)
-                    search_result = await call_text_search(
+                    search_details = await call_text_search(
                         query=query,
                         serper_api_key=serper_api_key,
                         summarizer_base_url=summarizer_base_url,
@@ -1523,23 +1639,54 @@ async def evaluate_tool(
                         serper_semaphore=serper_semaphore,
                         serper_concurrency=serper_concurrency,
                         search_cache=search_cache,
+                        return_details=True,
                     )
-                    tool_calls.append({"name": tool_name, "query": query})
+                    search_result = search_details["response"] if isinstance(search_details, dict) else str(search_details)
+                    tool_calls.append({
+                        "turn": turn + 1,
+                        "name": tool_name,
+                        "arguments": args,
+                        "query": query,
+                        "status": "ok",
+                        "cached": search_details.get("cached") if isinstance(search_details, dict) else None,
+                        "search_results": search_details.get("search_results", []) if isinstance(search_details, dict) else [],
+                        "all_search_results_count": len(search_details.get("all_search_results", [])) if isinstance(search_details, dict) else None,
+                        "summaries_count": search_details.get("summaries_count") if isinstance(search_details, dict) else None,
+                        "response_preview": truncate_text(search_result, 2000),
+                    })
                     tool_response = f"<tool_response>\n{search_result}\n</tool_response>"
                     messages.append({"role": "user", "content": tool_response})
                 else:
                     tool_response = "<tool_response>\nError: Search not available.\n</tool_response>"
+                    tool_calls.append({
+                        "turn": turn + 1,
+                        "name": tool_name,
+                        "arguments": args,
+                        "query": query,
+                        "status": "error",
+                        "error": "Search not available.",
+                    })
                     messages.append({"role": "user", "content": tool_response})
 
             elif tool_name == "image_search_tool":
                 # Data-driven image search - results come from dataset
-                tool_calls.append({"name": tool_name})
+                image_search_call = {
+                    "turn": turn + 1,
+                    "name": tool_name,
+                    "arguments": args,
+                    "status": "empty",
+                    "titles": [],
+                    "thumbnail_paths": [],
+                }
                 if image_search_data:
                     title_list = image_search_data.get("image_search_title_list", [])
                     thumbnail_list = image_search_data.get("image_search_thumbnail_list", [])
                     data_root = kwargs.get("data_root", "")
+                    image_search_call["titles"] = title_list or []
+                    image_search_call["thumbnail_paths"] = thumbnail_list or []
 
                     if title_list and thumbnail_list:
+                        image_search_call["status"] = "ok"
                         # Build interleaved content with titles and thumbnails
                         content_parts = [{"type": "text", "text": "<tool_response>\nReverse Image Search Results:"}]
                         thumb_markers = []  # Track thumbnail markers for HTML
@@ -1571,15 +1718,26 @@ async def evaluate_tool(
                             if i < len(thumb_markers):
                                 tool_response += thumb_markers[i]
                         tool_response += "\n</tool_response>"
+                        image_search_call["response_preview"] = truncate_text(tool_response, 2000)
                     else:
                         tool_response = "<tool_response>\nNo matching images were found.\n</tool_response>"
+                        image_search_call["response_preview"] = tool_response
                         messages.append({"role": "user", "content": tool_response})
                 else:
                     tool_response = "<tool_response>\nNo matching images were found.\n</tool_response>"
+                    image_search_call["response_preview"] = tool_response
                     messages.append({"role": "user", "content": tool_response})
+                tool_calls.append(image_search_call)
 
             else:
                 tool_response = f"<tool_response>\nError: Unknown tool '{tool_name}'.\n</tool_response>"
+                tool_calls.append({
+                    "turn": turn + 1,
+                    "name": tool_name,
+                    "arguments": args,
+                    "status": "error",
+                    "error": f"Unknown tool '{tool_name}'.",
+                })
                 messages.append({"role": "user", "content": tool_response})
 
             # Add to output in conversation format
@@ -1697,24 +1855,32 @@ async def evaluate_sample(
 
             # Compute scores dynamically based on score_methods from config
             scores = {}
+            score_details = {}
             extracted = None
+            final_answer = extract_answer_allow_no_tag(result["output"])
 
             for method in score_methods:
                 if method == "em_score_mcq":
                     extracted = extract_mcq_answer(result["output"])
                     em_correct = check_answer(extracted, sample["answer"])
                     scores[method] = 1.0 if em_correct else 0.0
+                    score_details[method] = {
+                        "extracted_answer": extracted,
+                        "matched": bool(em_correct),
+                    }
                 elif method == "llm_score":
                     judge_client = kwargs.get("judge_client", "azure")
                     judge_base_url = kwargs.get("judge_base_url", "")
                     judge_api_key = kwargs.get("judge_api_key", "")
                     judge_temperature = kwargs.get("judge_temperature", 0.0)
                     judge_model = kwargs.get("judge_model", "gpt-4o-2024-11-20")
-                    scores[method] = await llm_judge_score(
+                    judge_result = await llm_judge_evaluate(
                         sample["question"], result["output"], sample["answer"],
                         sample["image_path"],  # Send image to vision model judge
                         judge_client, judge_base_url, judge_api_key, judge_temperature, judge_model
                     )
+                    scores[method] = judge_result["score"]
+                    score_details[method] = judge_result
                 else:
                     # Unknown method - skip or set to None
                     scores[method] = None
@@ -1725,11 +1891,17 @@ async def evaluate_sample(
             result_dict = {
                 "sample_id": sample["id"],
                 "dataset": dataset_name,
+                "question": sample["question"],
+                "image_path": sample["image_path"],
                 "input": input_str,
                 "output": result["output"],
+                "final_answer": final_answer,
                 "gts": sample["answer"],  # answer is already a list
                 "finish_reason": result["finish_reason"],
                 "num_round": result["num_round"],
+                "tool_calls": result.get("tool_calls", []),
+                "score_details": score_details,
+                "metadata": sample.get("metadata", {}),
                 "saved_images": result.get("saved_images", []),  # For HTML generation only
             }
             # Add all scores with their method names
@@ -1743,11 +1915,17 @@ async def evaluate_sample(
             error_dict = {
                 "sample_id": sample["id"],
                 "dataset": dataset_name,
+                "question": sample.get("question", ""),
+                "image_path": sample.get("image_path", ""),
                 "input": "",
                 "output": "",
+                "final_answer": "",
                 "gts": sample["answer"],  # answer is already a list
                 "finish_reason": "error",
                 "num_round": 0,
+                "tool_calls": [],
+                "score_details": {},
+                "metadata": sample.get("metadata", {}),
                 "error": str(e),
             }
             # Add all score methods as 0.0 for errors
@@ -2091,6 +2269,9 @@ def generate_html(results: list[dict], output_path: str, images_subdir: str = "i
         .meta-item { background: var(--bg-tertiary); padding: 8px 12px; border-radius: 8px; font-size: 0.85em; }
         .meta-label { color: var(--text-secondary); }
         .meta-value { color: var(--green); }
+        .analysis-block { margin: 12px 0; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+        .analysis-block summary { cursor: pointer; color: var(--accent); font-weight: bold; }
+        .analysis-block pre { margin-top: 10px; white-space: pre-wrap; word-wrap: break-word; color: var(--text-primary); font-size: 0.85em; max-height: 420px; overflow-y: auto; }
         .conversation { display: flex; flex-direction: column; gap: 15px; }
         .turn { border-radius: 12px; overflow: hidden; border: 1px solid var(--border); }
         .turn-header { padding: 10px 15px; font-weight: bold; font-size: 0.85em; text-transform: uppercase; }
@@ -2117,6 +2298,8 @@ def generate_html(results: list[dict], output_path: str, images_subdir: str = "i
         <input type="text" id="search" placeholder="Search samples..." onkeyup="filterSamples()">
         <button onclick="expandAll()">Expand All</button>
         <button onclick="collapseAll()">Collapse All</button>
+        <button onclick="showOnlyWrong()">Only Wrong</button>
+        <button onclick="showAll()">Show All</button>
     </div>
     <div id="samples">
 '''
@@ -2125,9 +2308,10 @@ def generate_html(results: list[dict], output_path: str, images_subdir: str = "i
         sample_id = r.get("sample_id", f"sample-{i}")
         gts = r.get("gts", "")
         saved_images = r.get("saved_images", [])
+        is_correct = bool(r.get("llm_score", 0) > 0.5 or r.get("em_score_mcq", 0) > 0.5)
 
         # Keys to skip (large or not useful for display)
-        skip_keys = {"sample_id", "dataset", "input", "output", "gts", "saved_images"}
+        skip_keys = {"sample_id", "dataset", "input", "output", "gts", "saved_images", "tool_calls", "score_details", "metadata"}
 
         # Display all keys equally in meta-row
         meta_items = []
@@ -2149,18 +2333,29 @@ def generate_html(results: list[dict], output_path: str, images_subdir: str = "i
                 continue  # Skip complex or long values
             meta_items.append(f'<div class="meta-item"><span class="meta-label">{html_lib.escape(key)}:</span> <span class="meta-value">{formatted}</span></div>')
 
+        detail_blocks = []
+        for key in ["tool_calls", "score_details", "metadata"]:
+            value = r.get(key)
+            if value:
+                formatted_json = html_lib.escape(json.dumps(value, ensure_ascii=False, indent=2))
+                detail_blocks.append(
+                    f'<details class="analysis-block"><summary>{html_lib.escape(key)}</summary><pre>{formatted_json}</pre></details>'
+                )
+
         # Process input and output with image replacements
         input_html = highlight_tags_with_images(r.get("input", ""), saved_images)
         output_html = highlight_tags_with_images(r.get("output", ""), saved_images)
 
         html_content += f'''
-        <div class="sample collapsed" id="sample-{i}">
+        <div class="sample collapsed" id="sample-{i}" data-correct="{str(is_correct).lower()}">
             <div class="sample-header" onclick="toggle({i})">
                 <span class="toggle">&#9660;</span>
                 <span class="sample-title">{html_lib.escape(sample_id)}</span>
+                <span class="badge {'badge-positive' if is_correct else 'badge-negative'}">{'correct' if is_correct else 'wrong'}</span>
             </div>
             <div class="sample-content">
                 <div class="meta-row">{"".join(meta_items)}</div>
+                {"".join(detail_blocks)}
                 <div class="conversation">
                     <div class="turn user">
                         <div class="turn-header">Input</div>
@@ -2192,6 +2387,14 @@ def generate_html(results: list[dict], output_path: str, images_subdir: str = "i
             document.querySelectorAll('.sample').forEach(s => {
                 s.style.display = s.textContent.toLowerCase().includes(query) ? '' : 'none';
             });
+        }
+        function showOnlyWrong() {
+            document.querySelectorAll('.sample').forEach(s => {
+                s.style.display = s.dataset.correct === 'false' ? '' : 'none';
+            });
+        }
+        function showAll() {
+            document.querySelectorAll('.sample').forEach(s => s.style.display = '');
         }
     </script>
 </body>
