@@ -1048,6 +1048,24 @@ Question: {query}"""
 # Aligned with server config.json excluded_extensions
 SKIP_EXTENSIONS = ['.pdf', '.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx', '.jpg', '.jpeg', '.png', '.gif']
 
+DEFAULT_WEB_USER_AGENT = (
+    "Mozilla/5.0 (compatible; SenseNova-MARS-HR-MMSearch-Eval/1.0; "
+    "+https://github.com/violetEvergarden0/SenseNova-MARS)"
+)
+
+
+def get_web_user_agent() -> str:
+    """Return the user agent used for benchmark web page fetching."""
+    return os.environ.get("WEB_USER_AGENT", DEFAULT_WEB_USER_AGENT).strip() or DEFAULT_WEB_USER_AGENT
+
+
+def get_playwright_proxy() -> Optional[dict]:
+    """Return Playwright proxy config from PLAYWRIGHT_PROXY, if provided."""
+    proxy_server = os.environ.get("PLAYWRIGHT_PROXY", "").strip()
+    if not proxy_server:
+        return None
+    return {"server": proxy_server}
+
 # Global browser context for reuse
 _playwright = None
 _browser = None
@@ -1059,10 +1077,22 @@ async def _get_browser_context():
     global _playwright, _browser, _browser_context
     if _browser_context is None:
         _playwright = await async_playwright().start()
-        _browser = await _playwright.chromium.launch(headless=True)
-        # Use Chrome on Windows user agent
+        launch_kwargs = {"headless": True}
+        proxy = get_playwright_proxy()
+        if proxy:
+            launch_kwargs["proxy"] = proxy
+        _browser = await _playwright.chromium.launch(**launch_kwargs)
         _browser_context = await _browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.57 Safari/537.36"
+            user_agent=get_web_user_agent(),
+            extra_http_headers={
+                "User-Agent": get_web_user_agent(),
+                "Accept-Language": "en-US,en;q=0.9",
+            },
+        )
+        print(
+            "Web fetch browser initialized "
+            f"(proxy={'enabled' if proxy else 'disabled'}, user_agent={get_web_user_agent()!r})",
+            flush=True,
         )
     return _browser_context
 
