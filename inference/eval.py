@@ -891,7 +891,7 @@ async def call_openai_api(
 
     try:
         timeout = aiohttp.ClientTimeout(total=300)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
             async with session.post(url, headers=headers, json=body) as resp:
                 data = await resp.json()
                 if resp.status != 200:
@@ -953,7 +953,7 @@ async def call_gemini_api(
 
     try:
         timeout = aiohttp.ClientTimeout(total=300)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
             async with session.post(url, headers=headers, json=body) as resp:
                 data = await resp.json()
                 if resp.status != 200:
@@ -1000,7 +1000,7 @@ async def call_azure_api(
 
     try:
         timeout = aiohttp.ClientTimeout(total=300)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
             async with session.post(url, headers=headers, json=body) as resp:
                 data = await resp.json()
                 if resp.status != 200:
@@ -1059,12 +1059,13 @@ def get_web_user_agent() -> str:
     return os.environ.get("WEB_USER_AGENT", DEFAULT_WEB_USER_AGENT).strip() or DEFAULT_WEB_USER_AGENT
 
 
-def get_playwright_proxy() -> Optional[dict]:
-    """Return Playwright proxy config from PLAYWRIGHT_PROXY, if provided."""
-    proxy_server = os.environ.get("PLAYWRIGHT_PROXY", "").strip()
-    if not proxy_server:
-        return None
-    return {"server": proxy_server}
+def get_proxy_from_env() -> Optional[str]:
+    """Return proxy URL from common environment variables, if configured."""
+    for name in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy", "ALL_PROXY", "all_proxy"):
+        proxy_url = os.environ.get(name, "").strip()
+        if proxy_url:
+            return proxy_url
+    return None
 
 # Global browser context for reuse
 _playwright = None
@@ -1078,9 +1079,9 @@ async def _get_browser_context():
     if _browser_context is None:
         _playwright = await async_playwright().start()
         launch_kwargs = {"headless": True}
-        proxy = get_playwright_proxy()
-        if proxy:
-            launch_kwargs["proxy"] = proxy
+        proxy_url = get_proxy_from_env()
+        if proxy_url:
+            launch_kwargs["proxy"] = {"server": proxy_url}
         _browser = await _playwright.chromium.launch(**launch_kwargs)
         _browser_context = await _browser.new_context(
             user_agent=get_web_user_agent(),
@@ -1091,7 +1092,7 @@ async def _get_browser_context():
         )
         print(
             "Web fetch browser initialized "
-            f"(proxy={'enabled' if proxy else 'disabled'}, user_agent={get_web_user_agent()!r})",
+            f"(proxy={'enabled' if proxy_url else 'disabled'}, user_agent={get_web_user_agent()!r})",
             flush=True,
         )
     return _browser_context
@@ -1330,7 +1331,7 @@ async def call_text_search(
     for attempt in range(max_serper_attempts):
         async with serper_semaphore:
             try:
-                async with aiohttp.ClientSession() as session:
+                async with aiohttp.ClientSession(trust_env=True) as session:
                     async with session.post(url, headers=headers, json=payload) as resp:
                         if resp.status != 200:
                             error_text = await resp.text()
@@ -2686,7 +2687,7 @@ def main():
         print(f"  Checking model server: {base_url}", flush=True)
         try:
             timeout = aiohttp.ClientTimeout(total=10)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
                 # Try /v1/models endpoint (OpenAI-compatible)
                 url = f"{base_url.rstrip('/')}/v1/models"
                 headers = {"Content-Type": "application/json"}
@@ -2703,7 +2704,7 @@ def main():
         if args.mode == "tool" and summarizer_base_url:
             print(f"  Checking summarizer server: {summarizer_base_url}", flush=True)
             try:
-                async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
                     url = f"{summarizer_base_url.rstrip('/')}/v1/models"
                     async with session.get(url) as resp:
                         if resp.status != 200:
